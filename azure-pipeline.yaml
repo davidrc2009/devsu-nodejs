@@ -1,0 +1,145 @@
+pool:
+  name: Azure Pipelines
+steps:
+- task: eliostruyf.build-task.custom-build-task.file-creator@7
+  displayName: 'Create Dockerfile'
+  inputs:
+    filepath: Dockerfile
+    filecontent: |
+     # Usar una imagen oficial de Node.js como base
+     FROM node:18
+     
+     # Establecer el directorio de trabajo dentro del contenedor
+     WORKDIR /usr/src/app
+     
+     # Copiar los archivos de package.json y package-lock.json al contenedor
+     COPY package*.json ./
+     
+     # Instalar las dependencias del proyecto
+     RUN npm install
+     
+     # Copiar el resto de los archivos del proyecto al contenedor
+     COPY . .
+     
+     # Crear el archivo de base de datos dev.sqlite si no existe
+     RUN touch dev.sqlite && chmod 666 dev.sqlite
+     
+     # Exponer el puerto que utiliza la aplicación
+     EXPOSE 8000
+     
+     # Comando por defecto para ejecutar la aplicación
+     CMD ["npm", "run", "start"]
+     
+
+- task: Docker@0
+  displayName: build
+  inputs:
+    azureSubscription: test4
+    azureContainerRegistry: '{"loginServer":"devsuretotestacr2.azurecr.io", "id" : "/subscriptions/698a2508-2bb9-4c93-8b7b-4aca472b46e2/resourceGroups/devsu-reto-test-rg/providers/Microsoft.ContainerRegistry/registries/devsuretotestacr2"}'
+    dockerFile: Dockerfile
+    imageName: 'devsu-api'
+    additionalImageTags: '$(Build.BuildId)'
+
+- task: Docker@0
+  displayName: push
+  inputs:
+    azureSubscription: test4
+    azureContainerRegistry: '{"loginServer":"devsuretotestacr2.azurecr.io", "id" : "/subscriptions/698a2508-2bb9-4c93-8b7b-4aca472b46e2/resourceGroups/devsu-reto-test-rg/providers/Microsoft.ContainerRegistry/registries/devsuretotestacr2"}'
+    action: 'Push an image'
+    imageName: 'devsu-api'
+    additionalImageTags: '$(Build.BuildId)'
+
+- task: eliostruyf.build-task.custom-build-task.file-creator@6
+  displayName: 'Create file: devsu.deployapi.yaml'
+  inputs:
+    filepath: devsu.deployapi.yaml
+    filecontent: |
+     apiVersion: apps/v1
+     kind: Deployment
+     metadata:
+       name: devsu-api-deployment
+     spec:
+       replicas: 3
+       selector:
+         matchLabels:
+           app: devsu-api
+       template:
+         metadata:
+           labels:
+             app: devsu-api
+         spec:
+           containers:
+           - name: devsucontainerapi
+             image: devsuretotestacr2.azurecr.io/devsu-api:$(Build.BuildId)
+             ports:
+             - containerPort: 8000  
+     
+     ---
+     apiVersion: v1
+     kind: Service
+     metadata:
+       name: devsu-api-svc
+     spec:
+       type: ClusterIP
+       ports:
+       - port: 8000        
+         targetPort: 8000   
+       selector:
+         app: devsu-api
+     
+
+- task: KubernetesManifest@1
+  displayName: 'deploy Manifiest Core'
+  inputs:
+    connectionType: azureResourceManager
+    azureSubscriptionConnection: test4
+    azureResourceGroup: 'devsu-reto-test-rg'
+    kubernetesCluster: 'devsu-reto-test-aks'
+    namespace: 'public-ingress'
+    manifests: devsu.deployapi.yaml
+
+- task: eliostruyf.build-task.custom-build-task.file-creator@6
+  displayName: 'Create Ingress: devsu.deployingress.yaml copy'
+  inputs:
+    filepath: devsu.deployingress.yaml
+    filecontent: |
+     apiVersion: networking.k8s.io/v1
+     kind: Ingress
+     metadata:
+       name: devsu-api-ingress
+       annotations:
+         cert-manager.io/cluster-issuer: letsencrypt-production
+         nginx.ingress.kubernetes.io/rewrite-target: /$1
+         nginx.ingress.kubernetes.io/use-regex: "true"
+         nginx.ingress.kubernetes.io/proxy-connect-timeout: "3600"
+         nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+         nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+         nginx.ingress.kubernetes.io/client-body-timeout: "3600"
+         nginx.ingress.kubernetes.io/proxy-body-size: "30m"
+     spec:
+       ingressClassName: public
+       tls:
+       - hosts:
+         - devsu.sisash.net.pe #Use your domain
+         secretName: tls-secret-api
+       rules:
+       - host: devsu.sisash.net.pe #Use your domain
+         http:
+           paths:
+           - path: /?(.*)
+             pathType: Prefix
+             backend:
+               service:
+                 name: devsu-api-svc
+                 port:
+                   number: 8000
+
+- task: KubernetesManifest@1
+  displayName: 'deploy Core Ingress'
+  inputs:
+    connectionType: azureResourceManager
+    azureSubscriptionConnection: test4
+    azureResourceGroup: 'devsu-reto-test-rg'
+    kubernetesCluster: 'devsu-reto-test-aks'
+    namespace: 'public-ingress'
+    manifests: devsu.deployingress.yaml
